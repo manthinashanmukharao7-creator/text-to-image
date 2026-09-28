@@ -5,9 +5,14 @@ from io import BytesIO
 from transformers import CLIPProcessor, CLIPModel
 import torch
 
+# --------------------------------
+# Page configuration
+# --------------------------------
+
 st.set_page_config(
-    page_title="CLIP Google Image Search",
-    page_icon="🔍"
+    page_title="CLIP Text-Based Image Search",
+    page_icon="🔍",
+    layout="wide"
 )
 
 st.title("🔍 CLIP Text-Based Image Search")
@@ -16,9 +21,10 @@ st.write(
     "Search for images from the web and rank them using CLIP."
 )
 
-# -----------------------------
-# Load CLIP model
-# -----------------------------
+
+# --------------------------------
+# Load CLIP
+# --------------------------------
 
 @st.cache_resource
 def load_model():
@@ -37,50 +43,57 @@ def load_model():
 model, processor = load_model()
 
 
-# -----------------------------
+# --------------------------------
 # Google Image Search
-# -----------------------------
+# --------------------------------
 
-def google_image_search(query, api_key, cx, num_images=10):
+def google_image_search(query, number_of_images):
+
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    search_engine_id = st.secrets["GOOGLE_CX"]
 
     url = "https://www.googleapis.com/customsearch/v1"
 
     params = {
         "key": api_key,
-        "cx": cx,
+        "cx": search_engine_id,
         "q": query,
         "searchType": "image",
-        "num": num_images
+        "num": number_of_images
     }
 
-    response = requests.get(url, params=params)
+    response = requests.get(
+        url,
+        params=params,
+        timeout=20
+    )
 
     if response.status_code != 200:
-        st.error("Google Image Search API error.")
+        st.error("Google Image Search failed.")
         return []
 
     data = response.json()
 
-    images = []
+    image_urls = []
 
     for item in data.get("items", []):
 
         image_url = item.get("link")
 
         if image_url:
-            images.append(image_url)
+            image_urls.append(image_url)
 
-    return images
+    return image_urls
 
 
-# -----------------------------
-# CLIP Ranking
-# -----------------------------
+# --------------------------------
+# Download images
+# --------------------------------
 
-def rank_images(query, image_urls):
+def download_images(image_urls):
 
-    valid_images = []
-    image_objects = []
+    images = []
+    valid_urls = []
 
     for url in image_urls:
 
@@ -98,13 +111,22 @@ def rank_images(query, image_urls):
                 BytesIO(response.content)
             ).convert("RGB")
 
-            image_objects.append(image)
-            valid_images.append(url)
+            images.append(image)
+            valid_urls.append(url)
 
         except Exception:
             continue
 
-    if not image_objects:
+    return images, valid_urls
+
+
+# --------------------------------
+# CLIP ranking
+# --------------------------------
+
+def rank_images(query, images, urls):
+
+    if len(images) == 0:
         return []
 
     # Text embedding
@@ -128,9 +150,9 @@ def rank_images(query, image_urls):
         )
     )
 
-    # Image embeddings
+    # Image embedding
     image_inputs = processor(
-        images=image_objects,
+        images=images,
         return_tensors="pt"
     )
 
@@ -162,101 +184,95 @@ def rank_images(query, image_urls):
 
     for score, index in zip(scores, indices):
 
-        results.append(
-            (
-                valid_images[index.item()],
-                score.item()
-            )
-        )
+        results.append({
+            "url": urls[index.item()],
+            "score": score.item()
+        })
 
     return results
 
 
-# -----------------------------
+# --------------------------------
 # User interface
-# -----------------------------
-
-api_key = st.text_input(
-    "Google API Key",
-    type="password"
-)
-
-cx = st.text_input(
-    "Google Custom Search Engine ID"
-)
+# --------------------------------
 
 query = st.text_input(
     "Search images",
     placeholder="Example: golden retriever playing in snow"
 )
 
-num_images = st.slider(
+number_of_images = st.slider(
     "Number of images",
-    5,
-    10,
-    10
+    min_value=5,
+    max_value=10,
+    value=10
 )
 
 
 if st.button("🔍 Search"):
 
-    if not api_key or not cx:
+    if query.strip() == "":
 
         st.warning(
-            "Enter your Google API Key and Search Engine ID."
-        )
-
-    elif not query:
-
-        st.warning(
-            "Enter an image search query."
+            "Please enter an image search query."
         )
 
     else:
 
+        # Search Google
         with st.spinner(
-            "Searching Google Images..."
+            "Searching images from the web..."
         ):
 
             image_urls = google_image_search(
                 query,
-                api_key,
-                cx,
-                num_images
+                number_of_images
             )
 
-        if not image_urls:
+        if len(image_urls) == 0:
 
             st.error(
-                "No images were found."
+                "No images found."
             )
 
         else:
 
+            # Download
+            with st.spinner(
+                "Downloading images..."
+            ):
+
+                images, valid_urls = download_images(
+                    image_urls
+                )
+
+            # CLIP ranking
             with st.spinner(
                 "Ranking images using CLIP..."
             ):
 
                 results = rank_images(
                     query,
-                    image_urls
+                    images,
+                    valid_urls
                 )
 
             st.subheader(
-                "CLIP Ranked Results"
+                "🔍 CLIP Ranked Results"
             )
 
             columns = st.columns(3)
 
-            for i, (url, score) in enumerate(results):
+            for i, result in enumerate(results):
 
                 with columns[i % 3]:
 
                     st.image(
-                        url,
+                        result["url"],
                         use_container_width=True
                     )
 
                     st.write(
-                        f"Similarity: {score:.4f}"
+                        f"**Similarity:** "
+                        f"{result['score']:.4f}"
                     )
